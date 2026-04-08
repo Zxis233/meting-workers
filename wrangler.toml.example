@@ -1,0 +1,12 @@
+name = "meting-api-worker"
+main = "src/index.js"
+compatibility_date = "2026-04-08"
+
+[vars]
+DEBUG_ALLOW_ALL_REFERERS = "false"
+AUTH_SECRET = ""
+DEFAULT_SERVER = "netease"
+DEFAULT_BR = "320"
+CACHE_MAX_AGE = "300"
+PICSIZE = "300"
+LRCTYPE = "0"
