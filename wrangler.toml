@@ -12,4 +12,4 @@ PICSIZE = "300"
 LRCTYPE = "0"
 
 [secrets]
-required = ["SECRET", "AUTH_SECRET"]
+required = ["SECRET_DOMAIN", "AUTH_SECRET"]

@@ -192,7 +192,7 @@ function buildCacheKey(request, config, env) {
         br: String(config.br),
         picsize: config.picsize,
         lrctype: config.lrctype,
-        auth_enabled: hasAuthSecretFromEnv(env) ? '1' : '0',
+        auth_enabled: isAuthEnabled(env) ? '1' : '0',
     }).toString();
     return new Request(cacheUrl.toString(), { method: 'GET' });
 }
@@ -202,7 +202,7 @@ function authorizeRequest(request, env) {
         return { allowed: true };
     }
 
-    const allowlist = parseAllowlist(env.SECRET);
+    const allowlist = parseAllowlist(env.SECRET_DOMAIN);
     if (!allowlist.length) {
         return { allowed: false, reason: '未配置允许访问的 Referer 白名单' };
     }
@@ -297,13 +297,25 @@ function hasAuthSecretFromEnv(env) {
     return Boolean(String((env && env.AUTH_SECRET) || '').trim());
 }
 
+function isAuthEnabled(env) {
+    const explicit = env ? (env.AUTH_ENABLED ?? env.AUTH) : undefined;
+    if (explicit !== undefined && String(explicit).trim() !== '') {
+        return isTruthy(explicit);
+    }
+    return hasAuthSecretFromEnv(env);
+}
+
 async function verifyTypeAuth(request, config, env) {
     if (!['url', 'pic', 'lrc'].includes(config.type)) {
         return { allowed: true };
     }
 
-    if (!hasAuthSecretFromEnv(env)) {
+    if (!isAuthEnabled(env)) {
         return { allowed: true };
+    }
+
+    if (!hasAuthSecretFromEnv(env)) {
+        return { allowed: false, reason: 'AUTH_SECRET 未配置' };
     }
 
     const auth = new URL(request.url).searchParams.get('auth') || '';
@@ -312,7 +324,7 @@ async function verifyTypeAuth(request, config, env) {
         return { allowed: true };
     }
 
-    return { allowed: false, reason: 'auth 校验失败' };
+    return { allowed: false, reason: '非法请求' };
 }
 
 async function handleApiType(request, config, env) {
@@ -393,7 +405,7 @@ async function buildApiEndpointUrl(request, config, type, id, env) {
         id: String(id),
     }).toString();
 
-    if (hasAuthSecretFromEnv(env)) {
+    if (isAuthEnabled(env) && hasAuthSecretFromEnv(env)) {
         const auth = await createAuthSignature(`${config.server}${type}${id}`, env.AUTH_SECRET);
         url.searchParams.set('auth', auth);
     }
