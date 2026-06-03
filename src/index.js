@@ -5,8 +5,12 @@ const NETEASE_IV = '0102030405060708';
 
 const DEFAULT_NETEASE_COOKIE = 'appver=8.2.30; os=iPhone OS; osver=15.0; EVNSM=1.0.0; buildver=2206; channel=distribution; machineid=iPhone13.3';
 const DEFAULT_NETEASE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 CloudMusic/0.1.1 NeteaseMusic/8.2.30';
+const DEFAULT_NETEASE_REFRESH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const DEFAULT_TENCENT_COOKIE = 'pgv_pvi=22038528; pgv_si=s3156287488; pgv_pvid=5535248600; yplayer_open=1; ts_last=y.qq.com/portal/player.html; ts_uid=4847550686; yq_index=0; qqmusic_fromtag=66; player_exist=1';
 const DEFAULT_TENCENT_UA = 'QQ音乐/54409 CFNetwork/901.1 Darwin/17.6.0 (x86_64)';
+const DEFAULT_NETEASE_COOKIE_KV_KEY = 'NETEASE_COOKIE';
+const DEFAULT_NETEASE_COOKIE_META_KV_KEY = 'NETEASE_COOKIE_META';
+const COOKIE_ATTRIBUTE_NAMES = new Set(['domain', 'path', 'expires', 'max-age', 'httponly', 'secure', 'samesite', 'priority']);
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -26,6 +30,13 @@ export default {
                 'Cache-Control': 'no-store',
             });
         }
+    },
+
+    async scheduled(controller, env, ctx) {
+        ctx.waitUntil(refreshNeteaseCookie(env, {
+            scheduledTime: controller.scheduledTime,
+            cron: controller.cron,
+        }));
     },
 };
 
@@ -293,6 +304,147 @@ function isTruthy(value) {
     return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
 }
 
+function isExplicitlyFalse(value) {
+    return ['0', 'false', 'no', 'off'].includes(String(value || '').trim().toLowerCase());
+}
+
+function getCookieKv(env) {
+    const kv = env && (env.METING_COOKIE_KV || env.COOKIE_KV);
+    return kv && typeof kv.get === 'function' && typeof kv.put === 'function' ? kv : null;
+}
+
+function getNeteaseCookieKvKey(env) {
+    return String((env && env.NETEASE_COOKIE_KV_KEY) || DEFAULT_NETEASE_COOKIE_KV_KEY).trim() || DEFAULT_NETEASE_COOKIE_KV_KEY;
+}
+
+function getNeteaseCookieMetaKvKey(env) {
+    return String((env && env.NETEASE_COOKIE_META_KV_KEY) || DEFAULT_NETEASE_COOKIE_META_KV_KEY).trim() || DEFAULT_NETEASE_COOKIE_META_KV_KEY;
+}
+
+function hasNeteaseLoginCookie(cookie) {
+    return Boolean(extractCookieValue(cookie, 'MUSIC_U'));
+}
+
+function extractCookieValue(cookie, name) {
+    return parseCookieHeader(cookie).get(name) || '';
+}
+
+function parseCookieHeader(cookie) {
+    const jar = new Map();
+    for (const part of String(cookie || '').split(';')) {
+        const item = part.trim();
+        const equalIndex = item.indexOf('=');
+        if (equalIndex <= 0) {
+            continue;
+        }
+
+        const key = item.slice(0, equalIndex).trim();
+        const value = item.slice(equalIndex + 1).trim();
+        if (!key || COOKIE_ATTRIBUTE_NAMES.has(key.toLowerCase())) {
+            continue;
+        }
+
+        jar.set(key, value);
+    }
+    return jar;
+}
+
+async function readJsonSafely(response) {
+    try {
+        return await response.json();
+    } catch (_) {
+        return null;
+    }
+}
+
+function getSetCookieHeaders(headers) {
+    if (!headers) {
+        return [];
+    }
+
+    if (typeof headers.getSetCookie === 'function') {
+        const values = headers.getSetCookie();
+        if (Array.isArray(values) && values.length) {
+            return values.filter(Boolean);
+        }
+    }
+
+    if (typeof headers.getAll === 'function') {
+        const values = headers.getAll('Set-Cookie');
+        if (Array.isArray(values) && values.length) {
+            return values.filter(Boolean);
+        }
+    }
+
+    const combined = headers.get('Set-Cookie');
+    return combined ? splitCombinedSetCookieHeader(combined) : [];
+}
+
+function splitCombinedSetCookieHeader(value) {
+    const text = String(value || '');
+    const parts = [];
+    let start = 0;
+
+    for (let index = 0; index < text.length; index += 1) {
+        if (text[index] !== ',') {
+            continue;
+        }
+
+        const rest = text.slice(index + 1).trimStart();
+        if (/^[A-Za-z0-9_.-]+=/.test(rest)) {
+            parts.push(text.slice(start, index).trim());
+            start = index + 1;
+        }
+    }
+
+    parts.push(text.slice(start).trim());
+    return parts.filter(Boolean);
+}
+
+function mergeCookieUpdates(currentCookie, setCookieHeaders) {
+    const jar = parseCookieHeader(currentCookie);
+
+    for (const header of setCookieHeaders) {
+        const firstPart = String(header || '').split(';')[0].trim();
+        const equalIndex = firstPart.indexOf('=');
+        if (equalIndex <= 0) {
+            continue;
+        }
+
+        const key = firstPart.slice(0, equalIndex).trim();
+        const value = firstPart.slice(equalIndex + 1).trim();
+        if (!key || COOKIE_ATTRIBUTE_NAMES.has(key.toLowerCase())) {
+            continue;
+        }
+
+        if (isExpiredSetCookie(header)) {
+            jar.delete(key);
+        } else {
+            jar.set(key, value);
+        }
+    }
+
+    return Array.from(jar.entries())
+        .map(([key, value]) => `${key}=${value}`)
+        .join('; ');
+}
+
+function isExpiredSetCookie(header) {
+    const value = String(header || '').toLowerCase();
+    const maxAgeMatch = value.match(/;\s*max-age=(-?\d+)/);
+    if (maxAgeMatch && Number.parseInt(maxAgeMatch[1], 10) <= 0) {
+        return true;
+    }
+
+    const expiresMatch = String(header || '').match(/;\s*expires=([^;]+)/i);
+    if (!expiresMatch) {
+        return false;
+    }
+
+    const expiresAt = Date.parse(expiresMatch[1].trim());
+    return Number.isFinite(expiresAt) && expiresAt <= Date.now();
+}
+
 function hasAuthSecretFromEnv(env) {
     return Boolean(String((env && env.AUTH_SECRET) || '').trim());
 }
@@ -490,12 +642,7 @@ async function fetchNeteaseLyric(id, env) {
 }
 
 async function callNeteaseApi(pathname, body, env) {
-    const encryptedBody = await createNeteaseBody(body);
-    const response = await fetch(`https://music.163.com${pathname.replace('/api/', '/weapi/')}`, {
-        method: 'POST',
-        headers: createNeteaseHeaders(env),
-        body: new URLSearchParams(encryptedBody).toString(),
-    });
+    const response = await postNeteaseWeapi(pathname, body, env, await getNeteaseCookie(env));
 
     if (!response.ok) {
         throw new ApiError(502, `网易云上游请求失败: ${response.status}`);
@@ -504,17 +651,124 @@ async function callNeteaseApi(pathname, body, env) {
     return response.json();
 }
 
-function createNeteaseHeaders(env) {
+async function postNeteaseWeapi(pathname, body, env, cookie, options = {}) {
+    const encryptedBody = await createNeteaseBody(body);
+    return fetch(`https://music.163.com${pathname.replace('/api/', '/weapi/')}`, {
+        method: 'POST',
+        headers: createNeteaseHeaders(env, cookie, options),
+        body: new URLSearchParams(encryptedBody).toString(),
+    });
+}
+
+async function getNeteaseCookie(env) {
+    const storedCookie = await readStoredNeteaseCookie(env);
+    if (hasNeteaseLoginCookie(storedCookie) || !env.NETEASE_COOKIE) {
+        return storedCookie || env.NETEASE_COOKIE || DEFAULT_NETEASE_COOKIE;
+    }
+
+    console.warn('KV 中的网易云 Cookie 缺少 MUSIC_U，改用 NETEASE_COOKIE 兜底');
+    return env.NETEASE_COOKIE || DEFAULT_NETEASE_COOKIE;
+}
+
+async function readStoredNeteaseCookie(env) {
+    const kv = getCookieKv(env);
+    if (!kv) {
+        return '';
+    }
+
+    try {
+        const value = await kv.get(getNeteaseCookieKvKey(env));
+        return String(value || '').trim();
+    } catch (error) {
+        console.warn(`读取 KV 网易云 Cookie 失败，改用环境变量兜底: ${error && error.message ? error.message : String(error)}`);
+        return '';
+    }
+}
+
+function createNeteaseHeaders(env, cookie, options = {}) {
     return {
         Referer: 'https://music.163.com/',
-        Cookie: env.NETEASE_COOKIE || DEFAULT_NETEASE_COOKIE,
-        'User-Agent': DEFAULT_NETEASE_UA,
+        Cookie: cookie || env.NETEASE_COOKIE || DEFAULT_NETEASE_COOKIE,
+        'User-Agent': options.userAgent || DEFAULT_NETEASE_UA,
         'X-Real-IP': randomNeteaseIp(),
         Accept: '*/*',
         'Accept-Language': 'zh-CN,zh;q=0.8',
         Connection: 'keep-alive',
         'Content-Type': 'application/x-www-form-urlencoded',
     };
+}
+
+async function refreshNeteaseCookie(env, trigger = {}) {
+    if (isExplicitlyFalse(env.NETEASE_COOKIE_REFRESH_ENABLED)) {
+        console.log('网易云 Cookie 自动刷新已关闭');
+        return { ok: true, skipped: 'disabled' };
+    }
+
+    const kv = getCookieKv(env);
+    if (!kv) {
+        console.warn('未绑定 METING_COOKIE_KV 或 COOKIE_KV，跳过网易云 Cookie 自动刷新');
+        return { ok: false, skipped: 'kv_not_configured' };
+    }
+
+    const currentCookie = await getNeteaseCookie(env);
+    if (!hasNeteaseLoginCookie(currentCookie)) {
+        console.warn('NETEASE_COOKIE 缺少 MUSIC_U，跳过网易云 Cookie 自动刷新');
+        return { ok: false, skipped: 'missing_music_u' };
+    }
+
+    try {
+        const csrfToken = extractCookieValue(currentCookie, '__csrf') || extractCookieValue(currentCookie, '_csrf');
+        const response = await postNeteaseWeapi(
+            '/weapi/login/token/refresh',
+            {
+                csrf_token: csrfToken || '',
+            },
+            env,
+            currentCookie,
+            {
+                userAgent: DEFAULT_NETEASE_REFRESH_UA,
+            }
+        );
+        const data = await readJsonSafely(response);
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        if (data && data.code !== undefined && Number(data.code) !== 200) {
+            throw new Error(`upstream code ${data.code}`);
+        }
+
+        const setCookieHeaders = getSetCookieHeaders(response.headers);
+        if (!setCookieHeaders.length) {
+            throw new Error('upstream did not return Set-Cookie');
+        }
+
+        const refreshedCookie = mergeCookieUpdates(currentCookie, setCookieHeaders);
+        if (!hasNeteaseLoginCookie(refreshedCookie)) {
+            throw new Error('refreshed cookie is missing MUSIC_U');
+        }
+
+        const now = new Date().toISOString();
+        const cookieKey = getNeteaseCookieKvKey(env);
+        const metaKey = getNeteaseCookieMetaKvKey(env);
+
+        await Promise.all([
+            kv.put(cookieKey, refreshedCookie),
+            kv.put(metaKey, JSON.stringify({
+                refreshedAt: now,
+                scheduledTime: trigger.scheduledTime || null,
+                cron: trigger.cron || null,
+                setCookieCount: setCookieHeaders.length,
+                source: 'netease_login_token_refresh',
+            })),
+        ]);
+
+        console.log(`网易云 Cookie 刷新完成，更新 ${setCookieHeaders.length} 个 Cookie 字段`);
+        return { ok: true, refreshedAt: now, setCookieCount: setCookieHeaders.length };
+    } catch (error) {
+        console.error(`网易云 Cookie 刷新失败: ${error && error.message ? error.message : String(error)}`);
+        return { ok: false, error: error && error.message ? error.message : String(error) };
+    }
 }
 
 async function createNeteaseBody(body) {

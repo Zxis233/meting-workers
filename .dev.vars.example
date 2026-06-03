@@ -2,3 +2,4 @@ SECRET_DOMAIN= # 必填：允许访问的域名白名单，逗号分隔
 AUTH_SECRET= # 必填：用于生成 auth 签名
 NETEASE_COOKIE= # 可选：网易云 Cookie
 TENCENT_COOKIE= # 可选：QQ 音乐 Cookie
+NETEASE_COOKIE_REFRESH_ENABLED=true # 可选：是否启用定时刷新
