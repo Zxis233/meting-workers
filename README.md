@@ -99,14 +99,20 @@ Worker 运行时不能写回 `NETEASE_COOKIE` Secret，因此自动刷新使用 
 3. Cron 每 12 小时调用网易云 `/weapi/login/token/refresh`。
 4. 刷新成功后，把上游返回的 `Set-Cookie` 合并写回 KV。
 
-需要先创建并绑定 KV：
+需要先创建或准备一个 KV namespace。你已经创建的名称可以叫 `meting`，但 Wrangler 绑定部署时需要 namespace `id`，不能只写名称。
 
 ```bash
-wrangler kv namespace create METING_COOKIE_KV
-wrangler kv namespace create METING_COOKIE_KV --preview
+wrangler kv namespace list
 ```
 
-把命令返回的 `id` 和 `preview_id` 填入 `wrangler.toml` 里的 `[[kv_namespaces]]`。初始 `NETEASE_COOKIE` 需要是登录后的网页端 Cookie，至少应包含 `MUSIC_U`，否则定时刷新会跳过。
+公开仓库不要把 namespace id 写进 `wrangler.toml`。部署前用环境变量或 CI Secret 生成私有配置：
+
+```bash
+METING_KV_NAMESPACE_ID=你的_namespace_id node scripts/generate-wrangler-config.mjs
+wrangler deploy --config .wrangler/wrangler.generated.toml
+```
+
+`.wrangler/` 已经被 `.gitignore` 忽略。初始 `NETEASE_COOKIE` 需要是登录后的网页端 Cookie，至少应包含 `MUSIC_U`，否则定时刷新会跳过。
 
 ## 本地调试
 
@@ -145,14 +151,12 @@ wrangler dev
 ```bash
 cd meting-workers
 cp wrangler.toml.example wrangler.toml
-wrangler kv namespace create METING_COOKIE_KV
-wrangler kv namespace create METING_COOKIE_KV --preview
-# 将返回的 id / preview_id 填入 wrangler.toml 的 [[kv_namespaces]]
 wrangler secret put SECRET_DOMAIN
 wrangler secret put AUTH_SECRET
 wrangler secret put NETEASE_COOKIE
 wrangler secret put TENCENT_COOKIE
-wrangler deploy
+METING_KV_NAMESPACE_ID=你的_namespace_id node scripts/generate-wrangler-config.mjs
+wrangler deploy --config .wrangler/wrangler.generated.toml
 ```
 
 其中：
@@ -160,6 +164,7 @@ wrangler deploy
 - `AUTH_ENABLED` 建议直接写在 `wrangler.toml` 的 `[vars]`
 - `AUTH_SECRET`、`NETEASE_COOKIE`、`TENCENT_COOKIE` 建议用 `wrangler secret put`
 - `NETEASE_COOKIE` 是初始登录 Cookie；刷新后的 Cookie 会保存在 KV 中
+- `METING_KV_NAMESPACE_ID` 建议放在 GitHub Actions Secret 或本机环境变量，不提交到仓库
 
 ## 设计说明
 
