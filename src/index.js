@@ -43,6 +43,10 @@ export default {
 async function handleRequest(request, env, ctx) {
     const url = new URL(request.url);
 
+    if (url.pathname === '/api/relogin/163') {
+        return handleManualNeteaseRelogin(request, env);
+    }
+
     if (request.method === 'OPTIONS') {
         return handleOptions(request, env);
     }
@@ -144,6 +148,80 @@ function handleOptions(request, env) {
             'Cache-Control': 'public, max-age=86400',
         }),
     });
+}
+
+async function handleManualNeteaseRelogin(request, env) {
+    const now = new Date().toISOString();
+
+    if (request.method === 'OPTIONS') {
+        return new Response(null, {
+            status: 204,
+            headers: createCorsHeaders({
+                'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+                'Access-Control-Max-Age': '86400',
+                'Cache-Control': 'public, max-age=86400',
+            }),
+        });
+    }
+
+    if (!['GET', 'POST'].includes(request.method)) {
+        return jsonResponse(
+            {
+                ok: false,
+                statusCode: 405,
+                timestamp: now,
+                error: '仅支持 GET 或 POST 手动刷新',
+            },
+            405,
+            {
+                Allow: 'GET, POST',
+                'Cache-Control': 'no-store',
+            }
+        );
+    }
+
+    const authResult = await verifyBearerAuthorization(request, env);
+    if (!authResult.allowed) {
+        return jsonResponse(
+            {
+                ok: false,
+                statusCode: authResult.status,
+                timestamp: now,
+                error: authResult.reason,
+            },
+            authResult.status,
+            {
+                ...(authResult.status === 401 ? { 'WWW-Authenticate': 'Bearer' } : {}),
+                'Cache-Control': 'no-store',
+            }
+        );
+    }
+
+    const result = await refreshNeteaseCookie(
+        env,
+        {
+            manual: true,
+            path: new URL(request.url).pathname,
+            requestedAt: now,
+        },
+        {
+            force: true,
+            includeWriteDetails: true,
+        }
+    );
+    const statusCode = result.statusCode || (result.ok ? 200 : 500);
+
+    return jsonResponse(
+        {
+            ...result,
+            statusCode,
+            timestamp: result.timestamp || now,
+        },
+        statusCode,
+        {
+            'Cache-Control': 'no-store',
+        }
+    );
 }
 
 function isSongRoute(pathname) {
@@ -313,6 +391,16 @@ function getCookieKv(env) {
     return kv && typeof kv.get === 'function' && typeof kv.put === 'function' ? kv : null;
 }
 
+function getCookieKvBindingName(env) {
+    if (env && env.METING_COOKIE_KV) {
+        return 'METING_COOKIE_KV';
+    }
+    if (env && env.COOKIE_KV) {
+        return 'COOKIE_KV';
+    }
+    return '';
+}
+
 function getNeteaseCookieKvKey(env) {
     return String((env && env.NETEASE_COOKIE_KV_KEY) || DEFAULT_NETEASE_COOKIE_KV_KEY).trim() || DEFAULT_NETEASE_COOKIE_KV_KEY;
 }
@@ -347,6 +435,45 @@ function parseCookieHeader(cookie) {
         jar.set(key, value);
     }
     return jar;
+}
+
+async function describeNeteaseCookieKvWrites(cookieKey, cookieValue, metaKey, metadata) {
+    return [
+        {
+            key: cookieKey,
+            value: await describeCookieValue(cookieValue),
+        },
+        {
+            key: metaKey,
+            value: metadata,
+        },
+    ];
+}
+
+async function describeCookieValue(cookieValue) {
+    const cookieJar = parseCookieHeader(cookieValue);
+    return {
+        redacted: true,
+        length: String(cookieValue || '').length,
+        sha256: await sha256Hex(cookieValue),
+        hasMusicU: cookieJar.has('MUSIC_U'),
+        cookieNames: Array.from(cookieJar.keys()),
+        preview: redactCookieHeader(cookieValue),
+    };
+}
+
+function redactCookieHeader(cookieValue) {
+    const cookieJar = parseCookieHeader(cookieValue);
+    return Array.from(cookieJar.keys())
+        .map((key) => `${key}=<redacted>`)
+        .join('; ');
+}
+
+async function sha256Hex(value) {
+    const digest = await crypto.subtle.digest('SHA-256', encoder.encode(String(value || '')));
+    return Array.from(new Uint8Array(digest))
+        .map((byte) => byte.toString(16).padStart(2, '0'))
+        .join('');
 }
 
 async function readJsonSafely(response) {
@@ -447,6 +574,46 @@ function isExpiredSetCookie(header) {
 
 function hasAuthSecretFromEnv(env) {
     return Boolean(String((env && env.AUTH_SECRET) || '').trim());
+}
+
+async function verifyBearerAuthorization(request, env) {
+    if (!hasAuthSecretFromEnv(env)) {
+        return { allowed: false, status: 500, reason: 'AUTH_SECRET 未配置' };
+    }
+
+    const token = getBearerToken(request);
+    if (!token) {
+        return { allowed: false, status: 401, reason: '缺少 Bearer Token' };
+    }
+
+    const matched = await timingSafeEqualText(token, String(env.AUTH_SECRET));
+    if (!matched) {
+        return { allowed: false, status: 401, reason: 'Bearer Token 无效' };
+    }
+
+    return { allowed: true, status: 200 };
+}
+
+function getBearerToken(request) {
+    const authorization = request.headers.get('Authorization') || '';
+    const match = authorization.match(/^Bearer\s+(.+)$/i);
+    return match ? match[1].trim() : '';
+}
+
+async function timingSafeEqualText(actual, expected) {
+    const [actualDigest, expectedDigest] = await Promise.all([
+        crypto.subtle.digest('SHA-256', encoder.encode(String(actual || ''))),
+        crypto.subtle.digest('SHA-256', encoder.encode(String(expected || ''))),
+    ]);
+    const actualBytes = new Uint8Array(actualDigest);
+    const expectedBytes = new Uint8Array(expectedDigest);
+    let diff = actualBytes.length ^ expectedBytes.length;
+
+    for (let index = 0; index < Math.max(actualBytes.length, expectedBytes.length); index += 1) {
+        diff |= (actualBytes[index] || 0) ^ (expectedBytes[index] || 0);
+    }
+
+    return diff === 0;
 }
 
 function isAuthEnabled(env) {
@@ -698,22 +865,41 @@ function createNeteaseHeaders(env, cookie, options = {}) {
     };
 }
 
-async function refreshNeteaseCookie(env, trigger = {}) {
-    if (isExplicitlyFalse(env.NETEASE_COOKIE_REFRESH_ENABLED)) {
+async function refreshNeteaseCookie(env, trigger = {}, options = {}) {
+    const timestamp = new Date().toISOString();
+
+    if (!options.force && isExplicitlyFalse(env.NETEASE_COOKIE_REFRESH_ENABLED)) {
         console.log('网易云 Cookie 自动刷新已关闭');
-        return { ok: true, skipped: 'disabled' };
+        return {
+            ok: true,
+            statusCode: 200,
+            timestamp,
+            skipped: 'disabled',
+        };
     }
 
     const kv = getCookieKv(env);
     if (!kv) {
         console.warn('未绑定 METING_COOKIE_KV 或 COOKIE_KV，跳过网易云 Cookie 自动刷新');
-        return { ok: false, skipped: 'kv_not_configured' };
+        return {
+            ok: false,
+            statusCode: 500,
+            timestamp,
+            skipped: 'kv_not_configured',
+            error: '未绑定 METING_COOKIE_KV 或 COOKIE_KV',
+        };
     }
 
     const currentCookie = await getNeteaseCookie(env);
     if (!hasNeteaseLoginCookie(currentCookie)) {
         console.warn('NETEASE_COOKIE 缺少 MUSIC_U，跳过网易云 Cookie 自动刷新');
-        return { ok: false, skipped: 'missing_music_u' };
+        return {
+            ok: false,
+            statusCode: 409,
+            timestamp,
+            skipped: 'missing_music_u',
+            error: 'NETEASE_COOKIE 缺少 MUSIC_U',
+        };
     }
 
     try {
@@ -730,12 +916,13 @@ async function refreshNeteaseCookie(env, trigger = {}) {
             }
         );
         const data = await readJsonSafely(response);
+        const upstreamCode = data && data.code !== undefined ? Number(data.code) : null;
 
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
-        if (data && data.code !== undefined && Number(data.code) !== 200) {
-            throw new Error(`upstream code ${data.code}`);
+        if (upstreamCode !== null && upstreamCode !== 200) {
+            throw new Error(`upstream code ${upstreamCode}`);
         }
 
         const setCookieHeaders = getSetCookieHeaders(response.headers);
@@ -751,23 +938,53 @@ async function refreshNeteaseCookie(env, trigger = {}) {
         const now = new Date().toISOString();
         const cookieKey = getNeteaseCookieKvKey(env);
         const metaKey = getNeteaseCookieMetaKvKey(env);
+        const metadata = {
+            refreshedAt: now,
+            scheduledTime: trigger.scheduledTime || null,
+            cron: trigger.cron || null,
+            manual: Boolean(trigger.manual),
+            path: trigger.path || null,
+            requestedAt: trigger.requestedAt || null,
+            upstreamStatus: response.status,
+            upstreamCode,
+            setCookieCount: setCookieHeaders.length,
+            source: 'netease_login_token_refresh',
+        };
 
         await Promise.all([
             kv.put(cookieKey, refreshedCookie),
-            kv.put(metaKey, JSON.stringify({
-                refreshedAt: now,
-                scheduledTime: trigger.scheduledTime || null,
-                cron: trigger.cron || null,
-                setCookieCount: setCookieHeaders.length,
-                source: 'netease_login_token_refresh',
-            })),
+            kv.put(metaKey, JSON.stringify(metadata)),
         ]);
 
         console.log(`网易云 Cookie 刷新完成，更新 ${setCookieHeaders.length} 个 Cookie 字段`);
-        return { ok: true, refreshedAt: now, setCookieCount: setCookieHeaders.length };
+        return {
+            ok: true,
+            statusCode: 200,
+            timestamp: now,
+            refreshedAt: now,
+            upstream: {
+                status: response.status,
+                code: upstreamCode,
+            },
+            setCookieCount: setCookieHeaders.length,
+            kv: {
+                binding: getCookieKvBindingName(env),
+                writes: options.includeWriteDetails
+                    ? await describeNeteaseCookieKvWrites(cookieKey, refreshedCookie, metaKey, metadata)
+                    : [
+                        { key: cookieKey },
+                        { key: metaKey },
+                    ],
+            },
+        };
     } catch (error) {
         console.error(`网易云 Cookie 刷新失败: ${error && error.message ? error.message : String(error)}`);
-        return { ok: false, error: error && error.message ? error.message : String(error) };
+        return {
+            ok: false,
+            statusCode: 502,
+            timestamp: new Date().toISOString(),
+            error: error && error.message ? error.message : String(error),
+        };
     }
 }
 

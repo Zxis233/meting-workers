@@ -114,6 +114,15 @@ wrangler deploy --config .wrangler/wrangler.generated.toml
 
 `.wrangler/` 已经被 `.gitignore` 忽略。初始 `NETEASE_COOKIE` 需要是登录后的网页端 Cookie，至少应包含 `MUSIC_U`，否则定时刷新会跳过。
 
+也可以手动触发一次刷新：
+
+```bash
+curl -H "Authorization: Bearer your-auth-secret" \
+  https://your-worker.example/api/relogin/163
+```
+
+手动刷新接口支持 `GET` / `POST`，会复用 `AUTH_SECRET` 做 Bearer 校验。成功时返回 JSON，包含 HTTP 状态码、刷新时间、网易云上游状态、写入的 KV key，以及 Cookie 的脱敏摘要，例如长度、SHA-256、包含的 Cookie 名称和预览。接口不会返回完整登录 Cookie。
+
 ## 本地调试
 
 1. 复制配置示例
