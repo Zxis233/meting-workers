@@ -181,7 +181,7 @@ wrangler deploy --config .wrangler/wrangler.generated.toml
 - `type=song` 只取歌曲元数据，`url` / `pic` / `lrc` 的真实内容改由二级接口返回。
 - 白名单校验放在缓存读取之前，避免缓存命中绕过来源限制。
 - 鉴权语义对齐原项目：只对 `url` / `pic` / `lrc` 强制校验 `auth`，`song` 只负责生成带签名的二级链接。
-- 如果启用了 `AUTH_ENABLED`（或直接配置了 `AUTH_SECRET`），会仿照原项目对 `url` / `pic` / `lrc` 生成 HMAC-SHA1 `auth` 参数；缺失或错误签名会返回 `403 {"error":"非法请求"}`。
+- 如果启用了 `AUTH_ENABLED`（或直接配置了 `AUTH_SECRET`），会对 `url` / `pic` / `lrc` 生成 HMAC-SHA256 `auth` 参数；缺失或错误签名会返回 `403 {"error":"非法请求"}`。
 - 缓存使用 `caches.default`，缓存键会包含 `type`、`server`、`id`、`DEFAULT_BR`、`PICSIZE`、`LRCTYPE`。
 - 网易云 Cookie 使用顺序是 KV 优先，其次 `NETEASE_COOKIE` Secret，最后内置默认 Cookie。
 

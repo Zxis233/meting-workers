@@ -10,6 +10,7 @@ const DEFAULT_TENCENT_COOKIE = 'pgv_pvi=22038528; pgv_si=s3156287488; pgv_pvid=5
 const DEFAULT_TENCENT_UA = 'QQ音乐/54409 CFNetwork/901.1 Darwin/17.6.0 (x86_64)';
 const DEFAULT_NETEASE_COOKIE_KV_KEY = 'NETEASE_COOKIE';
 const DEFAULT_NETEASE_COOKIE_META_KV_KEY = 'NETEASE_COOKIE_META';
+const AUTH_SIGNATURE_VERSION = 'hmac-sha256-v1';
 const COOKIE_ATTRIBUTE_NAMES = new Set(['domain', 'path', 'expires', 'max-age', 'httponly', 'secure', 'samesite', 'priority']);
 
 const encoder = new TextEncoder();
@@ -282,6 +283,7 @@ function buildCacheKey(request, config, env) {
         picsize: config.picsize,
         lrctype: config.lrctype,
         auth_enabled: isAuthEnabled(env) ? '1' : '0',
+        auth_signature: AUTH_SIGNATURE_VERSION,
     }).toString();
     return new Request(cacheUrl.toString(), { method: 'GET' });
 }
@@ -639,7 +641,7 @@ async function verifyTypeAuth(request, config, env) {
 
     const auth = new URL(request.url).searchParams.get('auth') || '';
     const expected = await createAuthSignature(`${config.server}${config.type}${config.id}`, env.AUTH_SECRET);
-    if (auth && auth === expected) {
+    if (auth && await timingSafeEqualText(auth, expected)) {
         return { allowed: true };
     }
 
@@ -1621,7 +1623,7 @@ async function createAuthSignature(text, secret) {
         encoder.encode(secret),
         {
             name: 'HMAC',
-            hash: 'SHA-1',
+            hash: 'SHA-256',
         },
         false,
         ['sign']
