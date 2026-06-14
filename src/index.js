@@ -12,6 +12,8 @@ const DEFAULT_NETEASE_COOKIE_KV_KEY = 'NETEASE_COOKIE';
 const DEFAULT_NETEASE_COOKIE_META_KV_KEY = 'NETEASE_COOKIE_META';
 const AUTH_SIGNATURE_VERSION = 'hmac-sha256-v1';
 const COOKIE_ATTRIBUTE_NAMES = new Set(['domain', 'path', 'expires', 'max-age', 'httponly', 'secure', 'samesite', 'priority']);
+const TELEGRAM_PUSH_TEST_MESSAGE = 'Meting Worker Telegram 推送测试';
+const TELEGRAM_MESSAGE_MAX_LENGTH = 4000;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -46,6 +48,10 @@ async function handleRequest(request, env, ctx) {
 
     if (url.pathname === '/api/relogin/163') {
         return handleManualNeteaseRelogin(request, env);
+    }
+
+    if (url.pathname === '/api/push') {
+        return handleTelegramPushTest(request, env);
     }
 
     if (request.method === 'OPTIONS') {
@@ -217,6 +223,92 @@ async function handleManualNeteaseRelogin(request, env) {
             ...result,
             statusCode,
             timestamp: result.timestamp || now,
+        },
+        statusCode,
+        {
+            'Cache-Control': 'no-store',
+        }
+    );
+}
+
+async function handleTelegramPushTest(request, env) {
+    const now = new Date().toISOString();
+
+    if (request.method === 'OPTIONS') {
+        return new Response(null, {
+            status: 204,
+            headers: createCorsHeaders({
+                'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+                'Access-Control-Max-Age': '86400',
+                'Cache-Control': 'public, max-age=86400',
+            }),
+        });
+    }
+
+    if (!['GET', 'POST'].includes(request.method)) {
+        return jsonResponse(
+            {
+                ok: false,
+                statusCode: 405,
+                timestamp: now,
+                error: '仅支持 GET 或 POST 推送测试',
+            },
+            405,
+            {
+                Allow: 'GET, POST',
+                'Cache-Control': 'no-store',
+            }
+        );
+    }
+
+    const authResult = await verifyBearerAuthorization(request, env);
+    if (!authResult.allowed) {
+        return jsonResponse(
+            {
+                ok: false,
+                statusCode: authResult.status,
+                timestamp: now,
+                error: authResult.reason,
+            },
+            authResult.status,
+            {
+                ...(authResult.status === 401 ? { 'WWW-Authenticate': 'Bearer' } : {}),
+                'Cache-Control': 'no-store',
+            }
+        );
+    }
+
+    if (!isTelegramPushEnabled(env)) {
+        return jsonResponse(
+            {
+                ok: false,
+                statusCode: 503,
+                timestamp: now,
+                error: 'TELEGRAM_BOT_ID 和 TELEGRAM_CHAT_ID 未完整配置',
+            },
+            503,
+            {
+                'Cache-Control': 'no-store',
+            }
+        );
+    }
+
+    const result = await sendTelegramMessage(env, TELEGRAM_PUSH_TEST_MESSAGE);
+    const statusCode = result.ok ? 200 : 502;
+
+    return jsonResponse(
+        {
+            ok: result.ok,
+            statusCode,
+            timestamp: now,
+            message: TELEGRAM_PUSH_TEST_MESSAGE,
+            telegram: {
+                status: result.status,
+                ok: result.telegramOk,
+                description: result.description || null,
+                chatId: redactTelegramChatId(getTelegramChatId(env)),
+            },
         },
         statusCode,
         {
@@ -413,6 +505,11 @@ function getNeteaseCookieMetaKvKey(env) {
 
 function hasNeteaseLoginCookie(cookie) {
     return Boolean(extractCookieValue(cookie, 'MUSIC_U'));
+}
+
+function extractNeteaseMusicUCookie(cookie) {
+    const musicU = extractCookieValue(cookie, 'MUSIC_U');
+    return musicU ? `MUSIC_U=${musicU}` : '';
 }
 
 function extractCookieValue(cookie, name) {
@@ -616,6 +713,213 @@ async function timingSafeEqualText(actual, expected) {
     }
 
     return diff === 0;
+}
+
+function getTelegramBotId(env) {
+    const value = String((env && (env.TELEGRAM_BOT_ID || env.TELEGRAM_BOT_TOKEN)) || '').trim();
+    return value.toLowerCase().startsWith('bot') ? value.slice(3).trim() : value;
+}
+
+function getTelegramChatId(env) {
+    return String((env && env.TELEGRAM_CHAT_ID) || '').trim();
+}
+
+function isTelegramPushEnabled(env) {
+    return Boolean(getTelegramBotId(env) && getTelegramChatId(env));
+}
+
+async function sendTelegramMessage(env, text) {
+    const botId = getTelegramBotId(env);
+    const chatId = getTelegramChatId(env);
+
+    if (!botId || !chatId) {
+        return {
+            ok: false,
+            status: 0,
+            telegramOk: false,
+            description: 'telegram_not_configured',
+        };
+    }
+
+    if (/[/?#\s]/.test(botId)) {
+        return {
+            ok: false,
+            status: 0,
+            telegramOk: false,
+            description: 'TELEGRAM_BOT_ID 格式不合法',
+        };
+    }
+
+    try {
+        const response = await fetch(`https://api.telegram.org/bot${botId}/sendMessage`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                chat_id: chatId,
+                text: clampTelegramMessage(text),
+                disable_web_page_preview: true,
+            }),
+        });
+        const data = await readJsonSafely(response);
+        const telegramOk = Boolean(data && data.ok === true);
+
+        return {
+            ok: response.ok && telegramOk,
+            status: response.status,
+            telegramOk,
+            description: data?.description || (response.ok ? '' : response.statusText),
+        };
+    } catch (error) {
+        return {
+            ok: false,
+            status: 0,
+            telegramOk: false,
+            description: error && error.message ? error.message : String(error),
+        };
+    }
+}
+
+async function finishNeteaseCookieRefreshFailure(env, failure) {
+    const push = await notifyNeteaseCookieRefreshFailure(env, failure);
+    return push ? { ...failure, push } : failure;
+}
+
+async function finishNeteaseCookieRefreshSuccess(env, success) {
+    const push = await notifyNeteaseCookieRefreshSuccess(env, success);
+    return push ? { ...success, push } : success;
+}
+
+async function notifyNeteaseCookieRefreshSuccess(env, success) {
+    if (!isTelegramPushEnabled(env)) {
+        return null;
+    }
+
+    const result = await sendTelegramMessage(env, buildNeteaseCookieRefreshSuccessMessage(success));
+    if (!result.ok) {
+        console.warn(`Telegram 推送失败: ${result.description || result.status || 'unknown error'}`);
+    }
+
+    return {
+        enabled: true,
+        ok: result.ok,
+        status: result.status,
+        description: result.description || null,
+    };
+}
+
+async function notifyNeteaseCookieRefreshFailure(env, failure) {
+    if (!isTelegramPushEnabled(env)) {
+        return null;
+    }
+
+    const result = await sendTelegramMessage(env, buildNeteaseCookieRefreshFailureMessage(failure));
+    if (!result.ok) {
+        console.warn(`Telegram 推送失败: ${result.description || result.status || 'unknown error'}`);
+    }
+
+    return {
+        enabled: true,
+        ok: result.ok,
+        status: result.status,
+        description: result.description || null,
+    };
+}
+
+function buildNeteaseCookieRefreshSuccessMessage(success) {
+    const trigger = success.trigger || {};
+    const lines = [
+        'Meting Worker 网易云 Cookie 刷新成功',
+        `时间: ${formatTelegramValue(success.refreshedAt || success.timestamp)}`,
+        `状态码: ${formatTelegramValue(success.statusCode)}`,
+    ];
+
+    if (success.upstream) {
+        lines.push(`网易云上游: HTTP ${formatTelegramValue(success.upstream.status)} / code ${formatTelegramValue(success.upstream.code)}`);
+    }
+    if (success.setCookieCount !== undefined) {
+        lines.push(`上游 Set-Cookie 数: ${formatTelegramValue(success.setCookieCount)}`);
+    }
+    if (success.storedCookieNames?.length) {
+        lines.push(`KV Cookie 字段: ${success.storedCookieNames.map((name) => formatTelegramValue(name)).join(', ')}`);
+    }
+    if (success.kv?.binding) {
+        lines.push(`KV 绑定: ${formatTelegramValue(success.kv.binding)}`);
+    }
+    appendNeteaseCookieRefreshTriggerLines(lines, trigger);
+
+    return clampTelegramMessage(lines.join('\n'));
+}
+
+function buildNeteaseCookieRefreshFailureMessage(failure) {
+    const trigger = failure.trigger || {};
+    const lines = [
+        'Meting Worker 网易云 Cookie 刷新失败',
+        `时间: ${formatTelegramValue(failure.timestamp)}`,
+        `状态码: ${formatTelegramValue(failure.statusCode)}`,
+    ];
+
+    if (failure.error) {
+        lines.push(`错误: ${formatTelegramValue(failure.error, 500)}`);
+    }
+    if (failure.skipped) {
+        lines.push(`跳过原因: ${formatTelegramValue(failure.skipped)}`);
+    }
+    if (failure.upstream) {
+        lines.push(`网易云上游: HTTP ${formatTelegramValue(failure.upstream.status)} / code ${formatTelegramValue(failure.upstream.code)}`);
+    }
+    if (failure.kv?.binding) {
+        lines.push(`KV 绑定: ${formatTelegramValue(failure.kv.binding)}`);
+    }
+    appendNeteaseCookieRefreshTriggerLines(lines, trigger);
+
+    return clampTelegramMessage(lines.join('\n'));
+}
+
+function appendNeteaseCookieRefreshTriggerLines(lines, trigger) {
+    if (trigger.manual) {
+        lines.push(`触发方式: manual${trigger.path ? ` ${formatTelegramValue(trigger.path)}` : ''}`);
+    } else if (trigger.cron || trigger.scheduledTime) {
+        lines.push(`触发方式: cron ${formatTelegramValue(trigger.cron)}`);
+    }
+    if (trigger.scheduledTime) {
+        lines.push(`计划时间: ${formatTelegramValue(trigger.scheduledTime)}`);
+    }
+    if (trigger.requestedAt) {
+        lines.push(`请求时间: ${formatTelegramValue(trigger.requestedAt)}`);
+    }
+}
+
+function formatTelegramValue(value, maxLength = 200) {
+    if (value === null || value === undefined || value === '') {
+        return '-';
+    }
+
+    const text = String(value).replace(/\s+/g, ' ').trim();
+    if (text.length <= maxLength) {
+        return text;
+    }
+    return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function clampTelegramMessage(text) {
+    const value = String(text || '').trim();
+    if (value.length <= TELEGRAM_MESSAGE_MAX_LENGTH) {
+        return value;
+    }
+    return `${value.slice(0, TELEGRAM_MESSAGE_MAX_LENGTH - 3)}...`;
+}
+
+function redactTelegramChatId(chatId) {
+    const value = String(chatId || '').trim();
+    if (!value) {
+        return '';
+    }
+    if (value.length <= 4) {
+        return '<configured>';
+    }
+    return `${value.slice(0, 2)}***${value.slice(-2)}`;
 }
 
 function isAuthEnabled(env) {
@@ -869,6 +1173,13 @@ function createNeteaseHeaders(env, cookie, options = {}) {
 
 async function refreshNeteaseCookie(env, trigger = {}, options = {}) {
     const timestamp = new Date().toISOString();
+    const triggerDetails = {
+        scheduledTime: trigger.scheduledTime || null,
+        cron: trigger.cron || null,
+        manual: Boolean(trigger.manual),
+        path: trigger.path || null,
+        requestedAt: trigger.requestedAt || null,
+    };
 
     if (!options.force && isExplicitlyFalse(env.NETEASE_COOKIE_REFRESH_ENABLED)) {
         console.log('网易云 Cookie 自动刷新已关闭');
@@ -883,26 +1194,36 @@ async function refreshNeteaseCookie(env, trigger = {}, options = {}) {
     const kv = getCookieKv(env);
     if (!kv) {
         console.warn('未绑定 METING_COOKIE_KV 或 COOKIE_KV，跳过网易云 Cookie 自动刷新');
-        return {
+        return finishNeteaseCookieRefreshFailure(env, {
             ok: false,
             statusCode: 500,
             timestamp,
             skipped: 'kv_not_configured',
             error: '未绑定 METING_COOKIE_KV 或 COOKIE_KV',
-        };
+            trigger: triggerDetails,
+            kv: {
+                binding: getCookieKvBindingName(env) || null,
+            },
+        });
     }
 
     const currentCookie = await getNeteaseCookie(env);
     if (!hasNeteaseLoginCookie(currentCookie)) {
         console.warn('NETEASE_COOKIE 缺少 MUSIC_U，跳过网易云 Cookie 自动刷新');
-        return {
+        return finishNeteaseCookieRefreshFailure(env, {
             ok: false,
             statusCode: 409,
             timestamp,
             skipped: 'missing_music_u',
             error: 'NETEASE_COOKIE 缺少 MUSIC_U',
-        };
+            trigger: triggerDetails,
+            kv: {
+                binding: getCookieKvBindingName(env) || null,
+            },
+        });
     }
+
+    let upstream = null;
 
     try {
         const csrfToken = extractCookieValue(currentCookie, '__csrf') || extractCookieValue(currentCookie, '_csrf');
@@ -919,6 +1240,10 @@ async function refreshNeteaseCookie(env, trigger = {}, options = {}) {
         );
         const data = await readJsonSafely(response);
         const upstreamCode = data && data.code !== undefined ? Number(data.code) : null;
+        upstream = {
+            status: response.status,
+            code: upstreamCode,
+        };
 
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
@@ -936,57 +1261,69 @@ async function refreshNeteaseCookie(env, trigger = {}, options = {}) {
         if (!hasNeteaseLoginCookie(refreshedCookie)) {
             throw new Error('refreshed cookie is missing MUSIC_U');
         }
+        const storedCookie = extractNeteaseMusicUCookie(refreshedCookie);
+        if (!storedCookie) {
+            throw new Error('failed to extract MUSIC_U from refreshed cookie');
+        }
 
         const now = new Date().toISOString();
         const cookieKey = getNeteaseCookieKvKey(env);
         const metaKey = getNeteaseCookieMetaKvKey(env);
         const metadata = {
             refreshedAt: now,
-            scheduledTime: trigger.scheduledTime || null,
-            cron: trigger.cron || null,
-            manual: Boolean(trigger.manual),
-            path: trigger.path || null,
-            requestedAt: trigger.requestedAt || null,
+            scheduledTime: triggerDetails.scheduledTime,
+            cron: triggerDetails.cron,
+            manual: triggerDetails.manual,
+            path: triggerDetails.path,
+            requestedAt: triggerDetails.requestedAt,
             upstreamStatus: response.status,
             upstreamCode,
             setCookieCount: setCookieHeaders.length,
+            storedCookieNames: ['MUSIC_U'],
             source: 'netease_login_token_refresh',
         };
 
         await Promise.all([
-            kv.put(cookieKey, refreshedCookie),
+            kv.put(cookieKey, storedCookie),
             kv.put(metaKey, JSON.stringify(metadata)),
         ]);
 
-        console.log(`网易云 Cookie 刷新完成，更新 ${setCookieHeaders.length} 个 Cookie 字段`);
-        return {
+        console.log(`网易云 Cookie 刷新完成，更新 ${setCookieHeaders.length} 个 Cookie 字段，KV 仅保存 MUSIC_U`);
+        return finishNeteaseCookieRefreshSuccess(env, {
             ok: true,
             statusCode: 200,
             timestamp: now,
             refreshedAt: now,
+            trigger: triggerDetails,
             upstream: {
                 status: response.status,
                 code: upstreamCode,
             },
             setCookieCount: setCookieHeaders.length,
+            storedCookieNames: ['MUSIC_U'],
             kv: {
                 binding: getCookieKvBindingName(env),
                 writes: options.includeWriteDetails
-                    ? await describeNeteaseCookieKvWrites(cookieKey, refreshedCookie, metaKey, metadata)
+                    ? await describeNeteaseCookieKvWrites(cookieKey, storedCookie, metaKey, metadata)
                     : [
                         { key: cookieKey },
                         { key: metaKey },
                     ],
             },
-        };
+        });
     } catch (error) {
         console.error(`网易云 Cookie 刷新失败: ${error && error.message ? error.message : String(error)}`);
-        return {
+        return finishNeteaseCookieRefreshFailure(env, {
             ok: false,
             statusCode: 502,
             timestamp: new Date().toISOString(),
             error: error && error.message ? error.message : String(error),
-        };
+            trigger: triggerDetails,
+            upstream,
+            kv: {
+                binding: getCookieKvBindingName(env) || null,
+            },
+        });
     }
 }
 

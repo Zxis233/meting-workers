@@ -3,3 +3,5 @@ AUTH_SECRET= # 必填：用于生成 auth 签名
 NETEASE_COOKIE= # 可选：网易云 Cookie
 TENCENT_COOKIE= # 可选：QQ 音乐 Cookie
 NETEASE_COOKIE_REFRESH_ENABLED=true # 可选：是否启用定时刷新
+TELEGRAM_BOT_ID= # 可选：Telegram Bot API Token，用于 Cookie 刷新失败推送
+TELEGRAM_CHAT_ID= # 可选：Telegram Chat ID，与 TELEGRAM_BOT_ID 同时配置才启用推送
