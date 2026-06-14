@@ -14,6 +14,7 @@ const AUTH_SIGNATURE_VERSION = 'hmac-sha256-v1';
 const COOKIE_ATTRIBUTE_NAMES = new Set(['domain', 'path', 'expires', 'max-age', 'httponly', 'secure', 'samesite', 'priority']);
 const TELEGRAM_PUSH_TEST_MESSAGE = 'Meting Worker Telegram 推送测试';
 const TELEGRAM_MESSAGE_MAX_LENGTH = 4000;
+const DEFAULT_NETEASE_COOKIE_CHECK_URL = 'https://meting.esing.dev/?server=netease&type=song&id=31134338';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -36,7 +37,7 @@ export default {
     },
 
     async scheduled(controller, env, ctx) {
-        ctx.waitUntil(refreshNeteaseCookie(env, {
+        ctx.waitUntil(checkNeteaseCookie(env, {
             scheduledTime: controller.scheduledTime,
             cron: controller.cron,
         }));
@@ -48,6 +49,14 @@ async function handleRequest(request, env, ctx) {
 
     if (url.pathname === '/api/relogin/163') {
         return handleManualNeteaseRelogin(request, env);
+    }
+
+    if (url.pathname === '/api/check') {
+        return handleManualNeteaseCookieCheck(request, env);
+    }
+
+    if (url.pathname === '/api/putcookie') {
+        return handleManualNeteaseCookiePut(request, env);
     }
 
     if (url.pathname === '/api/push') {
@@ -225,6 +234,222 @@ async function handleManualNeteaseRelogin(request, env) {
             timestamp: result.timestamp || now,
         },
         statusCode,
+        {
+            'Cache-Control': 'no-store',
+        }
+    );
+}
+
+async function handleManualNeteaseCookieCheck(request, env) {
+    const now = new Date().toISOString();
+
+    if (request.method === 'OPTIONS') {
+        return new Response(null, {
+            status: 204,
+            headers: createCorsHeaders({
+                'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+                'Access-Control-Max-Age': '86400',
+                'Cache-Control': 'public, max-age=86400',
+            }),
+        });
+    }
+
+    if (!['GET', 'POST'].includes(request.method)) {
+        return jsonResponse(
+            {
+                ok: false,
+                statusCode: 405,
+                timestamp: now,
+                error: '仅支持 GET 或 POST 手动检查',
+            },
+            405,
+            {
+                Allow: 'GET, POST',
+                'Cache-Control': 'no-store',
+            }
+        );
+    }
+
+    const authResult = await verifyBearerAuthorization(request, env);
+    if (!authResult.allowed) {
+        return jsonResponse(
+            {
+                ok: false,
+                statusCode: authResult.status,
+                timestamp: now,
+                error: authResult.reason,
+            },
+            authResult.status,
+            {
+                ...(authResult.status === 401 ? { 'WWW-Authenticate': 'Bearer' } : {}),
+                'Cache-Control': 'no-store',
+            }
+        );
+    }
+
+    const requestUrl = new URL(request.url);
+    const checkSongId = (requestUrl.searchParams.get('id') || '').trim();
+    if (checkSongId && !/^[0-9A-Za-z_]+$/.test(checkSongId)) {
+        return jsonResponse(
+            {
+                ok: false,
+                statusCode: 400,
+                timestamp: now,
+                error: '歌曲 ID 格式不合法',
+            },
+            400,
+            {
+                'Cache-Control': 'no-store',
+            }
+        );
+    }
+
+    const result = await checkNeteaseCookie(env, {
+        manual: true,
+        path: requestUrl.pathname,
+        requestedAt: now,
+        id: checkSongId || null,
+    });
+    const statusCode = result.statusCode || (result.ok ? 200 : 502);
+
+    return jsonResponse(
+        {
+            ...result,
+            statusCode,
+            timestamp: result.timestamp || now,
+        },
+        statusCode,
+        {
+            'Cache-Control': 'no-store',
+        }
+    );
+}
+
+async function handleManualNeteaseCookiePut(request, env) {
+    const now = new Date().toISOString();
+
+    if (request.method === 'OPTIONS') {
+        return new Response(null, {
+            status: 204,
+            headers: createCorsHeaders({
+                'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+                'Access-Control-Max-Age': '86400',
+                'Cache-Control': 'public, max-age=86400',
+            }),
+        });
+    }
+
+    if (!['GET', 'POST'].includes(request.method)) {
+        return jsonResponse(
+            {
+                ok: false,
+                statusCode: 405,
+                timestamp: now,
+                error: '仅支持 GET 或 POST 写入 Cookie',
+            },
+            405,
+            {
+                Allow: 'GET, POST',
+                'Cache-Control': 'no-store',
+            }
+        );
+    }
+
+    const authResult = await verifyBearerAuthorization(request, env);
+    if (!authResult.allowed) {
+        return jsonResponse(
+            {
+                ok: false,
+                statusCode: authResult.status,
+                timestamp: now,
+                error: authResult.reason,
+            },
+            authResult.status,
+            {
+                ...(authResult.status === 401 ? { 'WWW-Authenticate': 'Bearer' } : {}),
+                'Cache-Control': 'no-store',
+            }
+        );
+    }
+
+    const kv = getCookieKv(env);
+    if (!kv) {
+        return jsonResponse(
+            {
+                ok: false,
+                statusCode: 500,
+                timestamp: now,
+                error: '未绑定 METING_COOKIE_KV 或 COOKIE_KV',
+            },
+            500,
+            {
+                'Cache-Control': 'no-store',
+            }
+        );
+    }
+
+    const url = new URL(request.url);
+    const musicU = normalizeNeteaseMusicUInput(url.searchParams.get('MUSIC_U') || url.searchParams.get('music_u') || '');
+    if (!musicU) {
+        return jsonResponse(
+            {
+                ok: false,
+                statusCode: 400,
+                timestamp: now,
+                error: '缺少 MUSIC_U 参数',
+            },
+            400,
+            {
+                'Cache-Control': 'no-store',
+            }
+        );
+    }
+
+    if (!isValidNeteaseMusicUValue(musicU)) {
+        return jsonResponse(
+            {
+                ok: false,
+                statusCode: 400,
+                timestamp: now,
+                error: 'MUSIC_U 参数格式不合法',
+            },
+            400,
+            {
+                'Cache-Control': 'no-store',
+            }
+        );
+    }
+
+    const cookieKey = getNeteaseCookieKvKey(env);
+    const metaKey = getNeteaseCookieMetaKvKey(env);
+    const cookieValue = `MUSIC_U=${musicU}`;
+    const metadata = {
+        updatedAt: now,
+        manual: true,
+        path: url.pathname,
+        source: 'manual_put_cookie',
+        storedCookieNames: ['MUSIC_U'],
+    };
+
+    await Promise.all([
+        kv.put(cookieKey, cookieValue),
+        kv.put(metaKey, JSON.stringify(metadata)),
+    ]);
+
+    return jsonResponse(
+        {
+            ok: true,
+            statusCode: 200,
+            timestamp: now,
+            storedCookieNames: ['MUSIC_U'],
+            kv: {
+                binding: getCookieKvBindingName(env),
+                writes: await describeNeteaseCookieKvWrites(cookieKey, cookieValue, metaKey, metadata),
+            },
+        },
+        200,
         {
             'Cache-Control': 'no-store',
         }
@@ -512,6 +737,26 @@ function extractNeteaseMusicUCookie(cookie) {
     return musicU ? `MUSIC_U=${musicU}` : '';
 }
 
+function normalizeNeteaseMusicUInput(value) {
+    const text = String(value || '').trim();
+    if (!text) {
+        return '';
+    }
+
+    if (text.includes('=') || text.includes(';')) {
+        return extractCookieValue(text, 'MUSIC_U').trim();
+    }
+
+    return text;
+}
+
+function isValidNeteaseMusicUValue(value) {
+    const text = String(value || '');
+    return Boolean(text)
+        && !/[;\r\n]/.test(text)
+        && text.length <= 4096;
+}
+
 function extractCookieValue(cookie, name) {
     return parseCookieHeader(cookie).get(name) || '';
 }
@@ -781,6 +1026,29 @@ async function sendTelegramMessage(env, text) {
     }
 }
 
+async function finishNeteaseCookieCheck(env, result) {
+    const push = await notifyNeteaseCookieCheck(env, result);
+    return push ? { ...result, push } : result;
+}
+
+async function notifyNeteaseCookieCheck(env, result) {
+    if (!isTelegramPushEnabled(env)) {
+        return null;
+    }
+
+    const pushResult = await sendTelegramMessage(env, buildNeteaseCookieCheckMessage(result));
+    if (!pushResult.ok) {
+        console.warn(`Telegram 推送失败: ${pushResult.description || pushResult.status || 'unknown error'}`);
+    }
+
+    return {
+        enabled: true,
+        ok: pushResult.ok,
+        status: pushResult.status,
+        description: pushResult.description || null,
+    };
+}
+
 async function finishNeteaseCookieRefreshFailure(env, failure) {
     const push = await notifyNeteaseCookieRefreshFailure(env, failure);
     return push ? { ...failure, push } : failure;
@@ -825,6 +1093,43 @@ async function notifyNeteaseCookieRefreshFailure(env, failure) {
         status: result.status,
         description: result.description || null,
     };
+}
+
+function buildNeteaseCookieCheckMessage(result) {
+    const check = result.check || {};
+    const lines = [
+        `Meting Worker 网易云 Cookie 检查${result.ok ? '成功' : '失败'}`,
+        `时间: ${formatTelegramValue(result.checkedAt || result.timestamp)}`,
+        `状态码: ${formatTelegramValue(result.statusCode)}`,
+    ];
+
+    if (result.error) {
+        lines.push(`错误: ${formatTelegramValue(result.error, 500)}`);
+    }
+    if (check.songEndpoint) {
+        lines.push(`检查接口: ${formatTelegramValue(check.songEndpoint, 500)}`);
+    }
+    if (check.songTitle || check.songAuthor) {
+        lines.push(`歌曲: ${formatTelegramValue([check.songTitle, check.songAuthor].filter(Boolean).join(' / '), 300)}`);
+    }
+    if (check.song) {
+        lines.push(`歌曲信息响应: HTTP ${formatTelegramValue(check.song.status)}${check.song.redirected ? ' redirected' : ''}`);
+    }
+    if (check.url) {
+        lines.push(`歌曲 URL 响应: HTTP ${formatTelegramValue(check.url.status)}${check.url.redirected ? ' redirected' : ''}`);
+    }
+    if (check.url?.location) {
+        lines.push(`Location: ${formatTelegramValue(check.url.location, 500)}`);
+    }
+    if (check.audio) {
+        lines.push(`音频地址响应: HTTP ${formatTelegramValue(check.audio.status)}${check.audio.redirected ? ' redirected' : ''}`);
+    }
+    if (check.audio?.url) {
+        lines.push(`最终地址: ${formatTelegramValue(check.audio.url, 500)}`);
+    }
+    appendNeteaseCookieRefreshTriggerLines(lines, result.trigger || {});
+
+    return clampTelegramMessage(lines.join('\n'));
 }
 
 function buildNeteaseCookieRefreshSuccessMessage(success) {
@@ -888,6 +1193,9 @@ function appendNeteaseCookieRefreshTriggerLines(lines, trigger) {
     }
     if (trigger.requestedAt) {
         lines.push(`请求时间: ${formatTelegramValue(trigger.requestedAt)}`);
+    }
+    if (trigger.id) {
+        lines.push(`检查歌曲 ID: ${formatTelegramValue(trigger.id)}`);
     }
 }
 
@@ -1171,18 +1479,227 @@ function createNeteaseHeaders(env, cookie, options = {}) {
     };
 }
 
-async function refreshNeteaseCookie(env, trigger = {}, options = {}) {
-    const timestamp = new Date().toISOString();
-    const triggerDetails = {
+function createTriggerDetails(trigger = {}) {
+    return {
         scheduledTime: trigger.scheduledTime || null,
         cron: trigger.cron || null,
         manual: Boolean(trigger.manual),
         path: trigger.path || null,
         requestedAt: trigger.requestedAt || null,
+        id: trigger.id || null,
+    };
+}
+
+async function checkNeteaseCookie(env, trigger = {}) {
+    const triggerDetails = createTriggerDetails(trigger);
+    const checkUrl = getNeteaseCookieCheckUrl(env, triggerDetails.id);
+    const check = {
+        songEndpoint: redactSensitiveUrl(checkUrl),
+        mode: 'internal',
     };
 
+    try {
+        const songResponse = await fetchNeteaseCookieCheckSongResponse(checkUrl, env);
+        check.song = summarizeHttpResponse(songResponse, checkUrl);
+
+        if (isHttpErrorStatus(songResponse.status)) {
+            throw new Error(`歌曲信息检查失败: HTTP ${songResponse.status}`);
+        }
+
+        const songPayload = await readJsonSafely(songResponse);
+        const song = Array.isArray(songPayload) ? songPayload[0] : null;
+        if (!song || typeof song !== 'object') {
+            throw new Error('歌曲信息检查返回格式不合法');
+        }
+
+        const songUrl = String(song.url || '').trim();
+        if (!songUrl) {
+            throw new Error('歌曲信息检查未返回 url 字段');
+        }
+
+        check.songTitle = String(song.title || '');
+        check.songAuthor = String(song.author || '');
+        check.songUrl = redactSensitiveUrl(songUrl);
+
+        const urlResponse = await fetchNeteaseCookieCheckUrlResponse(songUrl, env);
+        check.url = summarizeHttpResponse(urlResponse, songUrl);
+
+        if (isHttpErrorStatus(urlResponse.status)) {
+            throw new Error(`歌曲 URL 检查失败: HTTP ${urlResponse.status}`);
+        }
+
+        if (isRedirectStatus(urlResponse.status)) {
+            const audioUrl = getRedirectLocation(urlResponse, songUrl);
+            if (!audioUrl) {
+                throw new Error(`歌曲 URL 检查失败: HTTP ${urlResponse.status} 缺少 Location`);
+            }
+
+            check.url.location = redactSensitiveUrl(audioUrl);
+            const audioResponse = await fetch(audioUrl, {
+                method: 'GET',
+                headers: createNeteaseCookieAudioCheckHeaders({
+                    Accept: '*/*',
+                    Range: 'bytes=0-0',
+                }),
+                redirect: 'follow',
+            });
+            check.audio = summarizeHttpResponse(audioResponse);
+
+            if (isHttpErrorStatus(audioResponse.status)) {
+                throw new Error(`音频地址检查失败: HTTP ${audioResponse.status}`);
+            }
+        }
+
+        const checkedAt = new Date().toISOString();
+        return finishNeteaseCookieCheck(env, {
+            ok: true,
+            statusCode: 200,
+            timestamp: checkedAt,
+            checkedAt,
+            trigger: triggerDetails,
+            check,
+        });
+    } catch (error) {
+        const timestamp = new Date().toISOString();
+        console.error(`网易云 Cookie 检查失败: ${error && error.message ? error.message : String(error)}`);
+        return finishNeteaseCookieCheck(env, {
+            ok: false,
+            statusCode: 502,
+            timestamp,
+            error: error && error.message ? error.message : String(error),
+            trigger: triggerDetails,
+            check,
+        });
+    }
+}
+
+function getNeteaseCookieCheckUrl(env, songId = '') {
+    const rawUrl = String((env && env.NETEASE_COOKIE_CHECK_URL) || DEFAULT_NETEASE_COOKIE_CHECK_URL).trim() || DEFAULT_NETEASE_COOKIE_CHECK_URL;
+    const id = String(songId || '').trim();
+    if (!id) {
+        return rawUrl;
+    }
+
+    const url = new URL(rawUrl);
+    url.searchParams.set('id', id);
+    url.searchParams.set('server', normalizeServer(url.searchParams.get('server') || 'netease'));
+    url.searchParams.set('type', 'song');
+    return url.toString();
+}
+
+async function fetchNeteaseCookieCheckSongResponse(checkUrl, env) {
+    const url = new URL(checkUrl);
+    const config = readConfig(url, env);
+    if (config.server !== 'netease') {
+        throw new Error('Cookie 检查仅支持 netease 音乐源');
+    }
+    if (config.type !== 'song') {
+        throw new Error('Cookie 检查接口 type 必须为 song');
+    }
+    if (!config.id) {
+        throw new Error('Cookie 检查接口缺少歌曲 ID');
+    }
+
+    return handleSongType(new Request(url.toString(), { method: 'GET' }), config, env);
+}
+
+async function fetchNeteaseCookieCheckUrlResponse(songUrl, env) {
+    const url = new URL(songUrl);
+    const config = readConfig(url, env);
+    if (config.server !== 'netease') {
+        throw new Error('Cookie 检查返回的歌曲 URL 不是 netease 音乐源');
+    }
+    if (config.type !== 'url') {
+        throw new Error('Cookie 检查返回的歌曲 URL type 必须为 url');
+    }
+    if (!config.id) {
+        throw new Error('Cookie 检查返回的歌曲 URL 缺少歌曲 ID');
+    }
+
+    return handleUrlType(config, env);
+}
+
+function createNeteaseCookieAudioCheckHeaders(extraHeaders = {}) {
+    const headers = {
+        Accept: '*/*',
+        'User-Agent': DEFAULT_NETEASE_REFRESH_UA,
+    };
+
+    for (const [key, value] of Object.entries(extraHeaders)) {
+        if (value !== undefined && value !== null) {
+            headers[key] = value;
+        }
+    }
+
+    return headers;
+}
+
+function summarizeHttpResponse(response, fallbackUrl = '') {
+    return {
+        status: response.status,
+        ok: !isHttpErrorStatus(response.status),
+        redirected: Boolean(response.redirected),
+        url: redactSensitiveUrl(response.url || fallbackUrl),
+        contentType: response.headers.get('Content-Type') || '',
+    };
+}
+
+function isHttpErrorStatus(status) {
+    return status >= 400 && status <= 599;
+}
+
+function isRedirectStatus(status) {
+    return status >= 300 && status <= 399;
+}
+
+function getRedirectLocation(response, baseUrl) {
+    const location = response.headers.get('Location') || response.headers.get('location') || '';
+    if (!location) {
+        return '';
+    }
+
+    try {
+        return new URL(location, baseUrl).toString();
+    } catch (_) {
+        return String(location || '').trim();
+    }
+}
+
+function redactSensitiveUrl(value) {
+    const text = String(value || '').trim();
+    if (!text) {
+        return '';
+    }
+
+    try {
+        const url = new URL(text);
+        for (const key of Array.from(url.searchParams.keys())) {
+            if (isSensitiveQueryName(key)) {
+                url.searchParams.set(key, 'redacted');
+            }
+        }
+        return url.toString();
+    } catch (_) {
+        return formatTelegramValue(text, 500);
+    }
+}
+
+function isSensitiveQueryName(name) {
+    const key = String(name || '').toLowerCase();
+    return key.includes('auth')
+        || key.includes('token')
+        || key.includes('key')
+        || key.includes('sign')
+        || key === 'cookie'
+        || key === 'vkey';
+}
+
+async function refreshNeteaseCookie(env, trigger = {}, options = {}) {
+    const timestamp = new Date().toISOString();
+    const triggerDetails = createTriggerDetails(trigger);
+
     if (!options.force && isExplicitlyFalse(env.NETEASE_COOKIE_REFRESH_ENABLED)) {
-        console.log('网易云 Cookie 自动刷新已关闭');
+        console.log('网易云 Cookie 刷新已关闭');
         return {
             ok: true,
             statusCode: 200,
@@ -1193,7 +1710,7 @@ async function refreshNeteaseCookie(env, trigger = {}, options = {}) {
 
     const kv = getCookieKv(env);
     if (!kv) {
-        console.warn('未绑定 METING_COOKIE_KV 或 COOKIE_KV，跳过网易云 Cookie 自动刷新');
+        console.warn('未绑定 METING_COOKIE_KV 或 COOKIE_KV，跳过网易云 Cookie 刷新');
         return finishNeteaseCookieRefreshFailure(env, {
             ok: false,
             statusCode: 500,
@@ -1209,7 +1726,7 @@ async function refreshNeteaseCookie(env, trigger = {}, options = {}) {
 
     const currentCookie = await getNeteaseCookie(env);
     if (!hasNeteaseLoginCookie(currentCookie)) {
-        console.warn('NETEASE_COOKIE 缺少 MUSIC_U，跳过网易云 Cookie 自动刷新');
+        console.warn('NETEASE_COOKIE 缺少 MUSIC_U，跳过网易云 Cookie 刷新');
         return finishNeteaseCookieRefreshFailure(env, {
             ok: false,
             statusCode: 409,

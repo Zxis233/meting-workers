@@ -13,7 +13,7 @@ LRCTYPE = "0"
 NETEASE_COOKIE_REFRESH_ENABLED = "true"
 
 [triggers]
-crons = ["0 */6 * * *"]
+crons = ["0 */4 * * *"]
 
 # Public repo note:
 # Do not commit KV namespace IDs here. Generate a private deploy config with:
