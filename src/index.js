@@ -2,16 +2,32 @@ const NETEASE_MODULUS = '1577947502671315022124768178003454981218727833333897474
 const NETEASE_PUBKEY = 65537n;
 const NETEASE_NONCE = '0CoJUm6Qyw8W8jud';
 const NETEASE_IV = '0102030405060708';
+const NETEASE_EAPI_KEY = 'e82ckenh8dichen8';
+const NETEASE_EAPI_SALT = '36cd479b6b5';
 
 const DEFAULT_NETEASE_COOKIE = 'appver=8.2.30; os=iPhone OS; osver=15.0; EVNSM=1.0.0; buildver=2206; channel=distribution; machineid=iPhone13.3';
+const DEFAULT_NETEASE_MUSIC_A = '4ee5f776c9ed1e4d5f031b09e084c6cb333e43ee4a841afeebbef9bbf4b7e4152b51ff20ecb9e8ee9e89ab23044cf50d1609e4781e805e73a138419e5583bc7fd1e5933c52368d9127ba9ce4e2f233bf5a77ba40ea6045ae1fc612ead95d7b0e0edf70a74334194e1a190979f5fc12e9968c3666a981495b33a649814e309366';
 const DEFAULT_NETEASE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 CloudMusic/0.1.1 NeteaseMusic/8.2.30';
+const DEFAULT_NETEASE_EAPI_UA = 'NeteaseMusic/8.9.70.230820154231(9008070);Dalvik/2.1.0 (Linux; U; Android 13; Pixel 6 Build/TQ3A.230805.001)';
 const DEFAULT_NETEASE_REFRESH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+const NETEASE_WEAPI_REFRESH_USER_AGENTS = [
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 10_0 like Mac OS X) AppleWebKit/602.1.38 (KHTML, like Gecko) Version/10.0 Mobile/14A300 Safari/602.1',
+    'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/59.0.3071.115 Mobile Safari/537.36',
+    'NeteaseMusic/6.5.0.1575377963(164);Dalvik/2.1.0 (Linux; U; Android 9; MIX 2 MIUI/V12.0.1.0.PDECNXM)',
+];
 const DEFAULT_TENCENT_COOKIE = 'pgv_pvi=22038528; pgv_si=s3156287488; pgv_pvid=5535248600; yplayer_open=1; ts_last=y.qq.com/portal/player.html; ts_uid=4847550686; yq_index=0; qqmusic_fromtag=66; player_exist=1';
 const DEFAULT_TENCENT_UA = 'QQ音乐/54409 CFNetwork/901.1 Darwin/17.6.0 (x86_64)';
 const DEFAULT_NETEASE_COOKIE_KV_KEY = 'NETEASE_COOKIE';
 const DEFAULT_NETEASE_COOKIE_META_KV_KEY = 'NETEASE_COOKIE_META';
 const AUTH_SIGNATURE_VERSION = 'hmac-sha256-v1';
 const COOKIE_ATTRIBUTE_NAMES = new Set(['domain', 'path', 'expires', 'max-age', 'httponly', 'secure', 'samesite', 'priority']);
+const NETEASE_PLAYER_URL_V1_API = '/api/song/enhance/player/url/v1';
+const NETEASE_AUDIO_HOST_REWRITES = [
+    ['m801.', 'm701.'],
+    ['m804.', 'm701.'],
+    ['m704.', 'm701.'],
+    ['m8.', 'm7.'],
+];
 const TELEGRAM_PUSH_TEST_MESSAGE = 'Meting Worker Telegram 推送测试';
 const TELEGRAM_MESSAGE_MAX_LENGTH = 4000;
 const DEFAULT_NETEASE_COOKIE_CHECK_URL = 'https://meting.esing.dev/?server=netease&type=song&id=31134338';
@@ -37,7 +53,7 @@ export default {
     },
 
     async scheduled(controller, env, ctx) {
-        ctx.waitUntil(checkNeteaseCookie(env, {
+        ctx.waitUntil(runScheduledNeteaseMaintenance(env, {
             scheduledTime: controller.scheduledTime,
             cron: controller.cron,
         }));
@@ -290,6 +306,7 @@ async function handleManualNeteaseCookieCheck(request, env) {
 
     const requestUrl = new URL(request.url);
     const checkSongId = (requestUrl.searchParams.get('id') || '').trim();
+    const checkBr = (requestUrl.searchParams.get('br') || '').trim();
     if (checkSongId && !/^[0-9A-Za-z_]+$/.test(checkSongId)) {
         return jsonResponse(
             {
@@ -304,12 +321,27 @@ async function handleManualNeteaseCookieCheck(request, env) {
             }
         );
     }
+    if (checkBr && !/^\d+$/.test(checkBr)) {
+        return jsonResponse(
+            {
+                ok: false,
+                statusCode: 400,
+                timestamp: now,
+                error: 'br 参数格式不合法',
+            },
+            400,
+            {
+                'Cache-Control': 'no-store',
+            }
+        );
+    }
 
     const result = await checkNeteaseCookie(env, {
         manual: true,
         path: requestUrl.pathname,
         requestedAt: now,
         id: checkSongId || null,
+        br: checkBr || null,
     });
     const statusCode = result.statusCode || (result.ok ? 200 : 502);
 
@@ -610,7 +642,7 @@ function authorizeRequest(request, env) {
         return { allowed: true };
     }
 
-    const allowlist = parseAllowlist(env.SECRET_DOMAIN);
+    const allowlist = parseAllowlist(env.SECRET_DOMAIN || env.SECRET);
     if (!allowlist.length) {
         return { allowed: false, reason: '未配置允许访问的 Referer 白名单' };
     }
@@ -732,11 +764,6 @@ function hasNeteaseLoginCookie(cookie) {
     return Boolean(extractCookieValue(cookie, 'MUSIC_U'));
 }
 
-function extractNeteaseMusicUCookie(cookie) {
-    const musicU = extractCookieValue(cookie, 'MUSIC_U');
-    return musicU ? `MUSIC_U=${musicU}` : '';
-}
-
 function normalizeNeteaseMusicUInput(value) {
     const text = String(value || '').trim();
     if (!text) {
@@ -811,6 +838,10 @@ function redactCookieHeader(cookieValue) {
     return Array.from(cookieJar.keys())
         .map((key) => `${key}=<redacted>`)
         .join('; ');
+}
+
+function getCookieNames(cookieValue) {
+    return Array.from(parseCookieHeader(cookieValue).keys());
 }
 
 async function sha256Hex(value) {
@@ -1097,8 +1128,25 @@ async function notifyNeteaseCookieRefreshFailure(env, failure) {
 
 function buildNeteaseCookieCheckMessage(result) {
     const check = result.check || {};
+    if (result.ok) {
+        const lines = [
+            'Meting Worker 网易云 Cookie 检查正常',
+            `时间: ${formatTelegramValue(result.checkedAt || result.timestamp)}`,
+        ];
+        if (check.songTitle || check.songAuthor) {
+            lines.push(`歌曲: ${formatTelegramValue([check.songTitle, check.songAuthor].filter(Boolean).join(' / '), 120)}`);
+        }
+        if (check.audio) {
+            lines.push(`音频: HTTP ${formatTelegramValue(check.audio.status)}`);
+        } else if (check.url) {
+            lines.push(`歌曲 URL: HTTP ${formatTelegramValue(check.url.status)}`);
+        }
+        appendNeteaseCookieBriefTriggerLine(lines, result.trigger || {});
+        return clampTelegramMessage(lines.join('\n'));
+    }
+
     const lines = [
-        `Meting Worker 网易云 Cookie 检查${result.ok ? '成功' : '失败'}`,
+        'Meting Worker 网易云 Cookie 检查失败',
         `时间: ${formatTelegramValue(result.checkedAt || result.timestamp)}`,
         `状态码: ${formatTelegramValue(result.statusCode)}`,
     ];
@@ -1135,24 +1183,17 @@ function buildNeteaseCookieCheckMessage(result) {
 function buildNeteaseCookieRefreshSuccessMessage(success) {
     const trigger = success.trigger || {};
     const lines = [
-        'Meting Worker 网易云 Cookie 刷新成功',
+        'Meting Worker 网易云 Cookie 刷新正常',
         `时间: ${formatTelegramValue(success.refreshedAt || success.timestamp)}`,
-        `状态码: ${formatTelegramValue(success.statusCode)}`,
     ];
 
     if (success.upstream) {
-        lines.push(`网易云上游: HTTP ${formatTelegramValue(success.upstream.status)} / code ${formatTelegramValue(success.upstream.code)}`);
+        lines.push(`上游: HTTP ${formatTelegramValue(success.upstream.status)} / code ${formatTelegramValue(success.upstream.code)}`);
     }
     if (success.setCookieCount !== undefined) {
-        lines.push(`上游 Set-Cookie 数: ${formatTelegramValue(success.setCookieCount)}`);
+        lines.push(`Set-Cookie: ${formatTelegramValue(success.setCookieCount)}`);
     }
-    if (success.storedCookieNames?.length) {
-        lines.push(`KV Cookie 字段: ${success.storedCookieNames.map((name) => formatTelegramValue(name)).join(', ')}`);
-    }
-    if (success.kv?.binding) {
-        lines.push(`KV 绑定: ${formatTelegramValue(success.kv.binding)}`);
-    }
-    appendNeteaseCookieRefreshTriggerLines(lines, trigger);
+    appendNeteaseCookieBriefTriggerLine(lines, trigger);
 
     return clampTelegramMessage(lines.join('\n'));
 }
@@ -1196,6 +1237,17 @@ function appendNeteaseCookieRefreshTriggerLines(lines, trigger) {
     }
     if (trigger.id) {
         lines.push(`检查歌曲 ID: ${formatTelegramValue(trigger.id)}`);
+    }
+}
+
+function appendNeteaseCookieBriefTriggerLine(lines, trigger) {
+    if (trigger.manual) {
+        lines.push(`触发: manual${trigger.path ? ` ${formatTelegramValue(trigger.path)}` : ''}`);
+    } else if (trigger.cron || trigger.scheduledTime) {
+        lines.push(`触发: cron${trigger.cron ? ` ${formatTelegramValue(trigger.cron)}` : ''}`);
+    }
+    if (trigger.id) {
+        lines.push(`歌曲 ID: ${formatTelegramValue(trigger.id)}`);
     }
 }
 
@@ -1338,6 +1390,10 @@ async function buildApiEndpointUrl(request, config, type, id, env) {
         id: String(id),
     }).toString();
 
+    if (type === 'url') {
+        url.searchParams.set('br', String(config.br));
+    }
+
     if (isAuthEnabled(env) && hasAuthSecretFromEnv(env)) {
         const auth = await createAuthSignature(`${config.server}${type}${id}`, env.AUTH_SECRET);
         url.searchParams.set('auth', auth);
@@ -1374,23 +1430,70 @@ async function fetchNeteaseUrl(id, br, env) {
         throw new ApiError(400, '网易云歌曲 ID 必须是数字');
     }
 
-    const data = await callNeteaseApi(
-        '/api/song/enhance/player/url',
-        {
-            ids: [numericId],
-            br: br * 1000,
-        },
-        env
-    );
+    const levels = getNeteaseQualityLevels(br);
+    let lastItem = null;
 
-    const item = data && Array.isArray(data.data) ? data.data[0] : null;
-    const url = item ? item.url || item.uf?.url || '' : '';
+    for (const level of levels) {
+        const data = await callNeteaseEapi(
+            NETEASE_PLAYER_URL_V1_API,
+            {
+                encodeType: 'mp3',
+                ids: JSON.stringify([String(numericId)]),
+                level,
+            },
+            env
+        );
+
+        const item = data && Array.isArray(data.data) ? data.data[0] : null;
+        if (item) {
+            lastItem = item;
+        }
+
+        const url = item ? item.uf?.url || item.url || '' : '';
+        if (url) {
+            return {
+                url: rewriteNeteaseAudioUrl(url),
+                size: item.size || 0,
+                br: item.br || -1,
+                level,
+            };
+        }
+    }
+
+    const legacyItem = await fetchLegacyNeteaseUrlItem(numericId, br, env);
+    const legacyUrl = legacyItem ? legacyItem.uf?.url || legacyItem.url || '' : '';
+    if (legacyUrl) {
+        return {
+            url: rewriteNeteaseAudioUrl(legacyUrl),
+            size: legacyItem.size || 0,
+            br: legacyItem.br || -1,
+            level: 'legacy',
+        };
+    }
 
     return {
-        url,
-        size: item ? item.size || 0 : 0,
-        br: item ? item.br || -1 : -1,
+        url: '',
+        size: lastItem ? lastItem.size || 0 : 0,
+        br: lastItem ? lastItem.br || -1 : -1,
+        level: levels[0] || '',
     };
+}
+
+async function fetchLegacyNeteaseUrlItem(numericId, br, env) {
+    try {
+        const data = await callNeteaseApi(
+            '/api/song/enhance/player/url',
+            {
+                ids: [numericId],
+                br: br * 1000,
+            },
+            env
+        );
+        return data && Array.isArray(data.data) ? data.data[0] : null;
+    } catch (error) {
+        console.warn(`网易云旧版音频地址兜底失败: ${error && error.message ? error.message : String(error)}`);
+        return null;
+    }
 }
 
 async function fetchNeteaseLyric(id, env) {
@@ -1432,11 +1535,39 @@ async function callNeteaseApi(pathname, body, env) {
     return response.json();
 }
 
+async function callNeteaseEapi(pathname, body, env) {
+    const response = await postNeteaseEapi(pathname, body, env, await getNeteaseCookie(env));
+
+    if (!response.ok) {
+        throw new ApiError(502, `网易云上游请求失败: ${response.status}`);
+    }
+
+    return response.json();
+}
+
 async function postNeteaseWeapi(pathname, body, env, cookie, options = {}) {
     const encryptedBody = await createNeteaseBody(body);
     return fetch(`https://music.163.com${pathname.replace('/api/', '/weapi/')}`, {
         method: 'POST',
         headers: createNeteaseHeaders(env, cookie, options),
+        body: new URLSearchParams(encryptedBody).toString(),
+    });
+}
+
+async function postNeteaseRefreshWeapi(cookie) {
+    const encryptedBody = await createNeteaseBody({});
+    return fetch('https://music.163.com/weapi/login/token/refresh', {
+        method: 'POST',
+        headers: createNeteaseRefreshHeaders(cookie),
+        body: new URLSearchParams(encryptedBody).toString(),
+    });
+}
+
+async function postNeteaseEapi(pathname, body, env, cookie, options = {}) {
+    const encryptedBody = await createNeteaseEapiBody(pathname, body);
+    return fetch(`https://music.163.com${pathname.replace('/api/', '/eapi/')}`, {
+        method: 'POST',
+        headers: createNeteaseEapiHeaders(env, cookie, options),
         body: new URLSearchParams(encryptedBody).toString(),
     });
 }
@@ -1479,6 +1610,120 @@ function createNeteaseHeaders(env, cookie, options = {}) {
     };
 }
 
+function createNeteaseEapiHeaders(env, cookie, options = {}) {
+    const spoofIp = randomNeteaseIp();
+    return {
+        Referer: 'https://music.163.com/',
+        Cookie: createNeteaseMobileCookieHeader(cookie || env.NETEASE_COOKIE || DEFAULT_NETEASE_COOKIE),
+        'User-Agent': options.userAgent || DEFAULT_NETEASE_EAPI_UA,
+        'X-Real-IP': spoofIp,
+        'X-Forwarded-For': spoofIp,
+        HTTP_X_FORWARDED_FOR: spoofIp,
+        'CLIENT-IP': spoofIp,
+        Accept: '*/*',
+        'Accept-Language': 'zh-CN,zh;q=0.8',
+        Connection: 'keep-alive',
+        'Content-Type': 'application/x-www-form-urlencoded',
+    };
+}
+
+function createNeteaseRefreshHeaders(cookie) {
+    return {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': chooseNeteaseRefreshUserAgent(),
+        Referer: 'https://music.163.com/',
+        Origin: 'https://music.163.com',
+        Accept: '*/*',
+        Cookie: renderNeteaseRefreshCookieHeader(cookie),
+    };
+}
+
+function createNeteaseMobileCookieHeader(cookie) {
+    const jar = parseCookieHeader(cookie || DEFAULT_NETEASE_COOKIE);
+    jar.set('appver', '8.9.70');
+    jar.set('buildver', String(Math.floor(Date.now() / 1000)));
+    jar.set('resolution', '1920x1080');
+    jar.set('os', 'android');
+
+    if (!jar.has('MUSIC_U') && !jar.has('MUSIC_A')) {
+        jar.set('MUSIC_A', DEFAULT_NETEASE_MUSIC_A);
+    }
+
+    return Array.from(jar.entries())
+        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+        .join('; ');
+}
+
+function renderNeteaseRefreshCookieHeader(cookie) {
+    const jar = parseCookieHeader(cookie || DEFAULT_NETEASE_COOKIE);
+    if (!jar.has('os')) {
+        jar.set('os', 'pc');
+    }
+    if (!jar.has('appver')) {
+        jar.set('appver', '8.9.70');
+    }
+
+    return renderCookieHeader(jar);
+}
+
+function renderCookieHeader(cookieJar) {
+    return Array.from(cookieJar.entries())
+        .filter(([key, value]) => String(key || '').trim() && String(value || '').trim())
+        .map(([key, value]) => `${String(key).trim()}=${String(value).trim()}`)
+        .join('; ');
+}
+
+function chooseNeteaseRefreshUserAgent() {
+    return NETEASE_WEAPI_REFRESH_USER_AGENTS[Math.floor(Math.random() * NETEASE_WEAPI_REFRESH_USER_AGENTS.length)] || DEFAULT_NETEASE_UA;
+}
+
+function getNeteaseQualityLevels(br) {
+    const bitrate = Number.parseInt(br, 10);
+    const primary = bitrate >= 2000
+        ? 'hires'
+        : bitrate >= 1000
+            ? 'lossless'
+            : bitrate >= 320
+                ? 'exhigh'
+                : bitrate >= 192
+                    ? 'higher'
+                    : 'standard';
+    const order = ['hires', 'lossless', 'exhigh', 'higher', 'standard'];
+    const start = order.indexOf(primary);
+    return start >= 0 ? order.slice(start) : ['standard'];
+}
+
+function rewriteNeteaseAudioUrl(rawUrl) {
+    const normalized = normalizeHttps(rawUrl);
+    if (!normalized) {
+        return '';
+    }
+
+    try {
+        const url = new URL(normalized);
+        let host = url.host;
+        for (const [from, to] of NETEASE_AUDIO_HOST_REWRITES) {
+            host = host.split(from).join(to);
+        }
+        url.host = host;
+        return url.toString();
+    } catch (_) {
+        let output = normalized;
+        for (const [from, to] of NETEASE_AUDIO_HOST_REWRITES) {
+            output = output.split(from).join(to);
+        }
+        return output;
+    }
+}
+
+async function runScheduledNeteaseMaintenance(env, trigger = {}) {
+    if (!isExplicitlyFalse(env.NETEASE_COOKIE_REFRESH_ENABLED)) {
+        await refreshNeteaseCookie(env, trigger);
+    }
+
+    return checkNeteaseCookie(env, trigger);
+}
+
 function createTriggerDetails(trigger = {}) {
     return {
         scheduledTime: trigger.scheduledTime || null,
@@ -1487,12 +1732,13 @@ function createTriggerDetails(trigger = {}) {
         path: trigger.path || null,
         requestedAt: trigger.requestedAt || null,
         id: trigger.id || null,
+        br: trigger.br || null,
     };
 }
 
 async function checkNeteaseCookie(env, trigger = {}) {
     const triggerDetails = createTriggerDetails(trigger);
-    const checkUrl = getNeteaseCookieCheckUrl(env, triggerDetails.id);
+    const checkUrl = getNeteaseCookieCheckUrl(env, triggerDetails.id, triggerDetails.br);
     const check = {
         songEndpoint: redactSensitiveUrl(checkUrl),
         mode: 'internal',
@@ -1573,15 +1819,21 @@ async function checkNeteaseCookie(env, trigger = {}) {
     }
 }
 
-function getNeteaseCookieCheckUrl(env, songId = '') {
+function getNeteaseCookieCheckUrl(env, songId = '', br = '') {
     const rawUrl = String((env && env.NETEASE_COOKIE_CHECK_URL) || DEFAULT_NETEASE_COOKIE_CHECK_URL).trim() || DEFAULT_NETEASE_COOKIE_CHECK_URL;
     const id = String(songId || '').trim();
-    if (!id) {
+    const bitrate = String(br || '').trim();
+    if (!id && !bitrate) {
         return rawUrl;
     }
 
     const url = new URL(rawUrl);
-    url.searchParams.set('id', id);
+    if (id) {
+        url.searchParams.set('id', id);
+    }
+    if (bitrate) {
+        url.searchParams.set('br', bitrate);
+    }
     url.searchParams.set('server', normalizeServer(url.searchParams.get('server') || 'netease'));
     url.searchParams.set('type', 'song');
     return url.toString();
@@ -1743,30 +1995,21 @@ async function refreshNeteaseCookie(env, trigger = {}, options = {}) {
     let upstream = null;
 
     try {
-        const csrfToken = extractCookieValue(currentCookie, '__csrf') || extractCookieValue(currentCookie, '_csrf');
-        const response = await postNeteaseWeapi(
-            '/weapi/login/token/refresh',
-            {
-                csrf_token: csrfToken || '',
-            },
-            env,
-            currentCookie,
-            {
-                userAgent: DEFAULT_NETEASE_REFRESH_UA,
-            }
-        );
+        const response = await postNeteaseRefreshWeapi(currentCookie);
         const data = await readJsonSafely(response);
         const upstreamCode = data && data.code !== undefined ? Number(data.code) : null;
+        const upstreamMessage = String(data?.message || '').trim();
         upstream = {
             status: response.status,
             code: upstreamCode,
+            message: upstreamMessage || null,
         };
 
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
         if (upstreamCode !== null && upstreamCode !== 200) {
-            throw new Error(`upstream code ${upstreamCode}`);
+            throw new Error(upstreamMessage || `upstream code ${upstreamCode}`);
         }
 
         const setCookieHeaders = getSetCookieHeaders(response.headers);
@@ -1778,10 +2021,8 @@ async function refreshNeteaseCookie(env, trigger = {}, options = {}) {
         if (!hasNeteaseLoginCookie(refreshedCookie)) {
             throw new Error('refreshed cookie is missing MUSIC_U');
         }
-        const storedCookie = extractNeteaseMusicUCookie(refreshedCookie);
-        if (!storedCookie) {
-            throw new Error('failed to extract MUSIC_U from refreshed cookie');
-        }
+        const storedCookie = refreshedCookie;
+        const storedCookieNames = getCookieNames(storedCookie);
 
         const now = new Date().toISOString();
         const cookieKey = getNeteaseCookieKvKey(env);
@@ -1795,8 +2036,9 @@ async function refreshNeteaseCookie(env, trigger = {}, options = {}) {
             requestedAt: triggerDetails.requestedAt,
             upstreamStatus: response.status,
             upstreamCode,
+            upstreamMessage: upstreamMessage || null,
             setCookieCount: setCookieHeaders.length,
-            storedCookieNames: ['MUSIC_U'],
+            storedCookieNames,
             source: 'netease_login_token_refresh',
         };
 
@@ -1805,7 +2047,7 @@ async function refreshNeteaseCookie(env, trigger = {}, options = {}) {
             kv.put(metaKey, JSON.stringify(metadata)),
         ]);
 
-        console.log(`网易云 Cookie 刷新完成，更新 ${setCookieHeaders.length} 个 Cookie 字段，KV 仅保存 MUSIC_U`);
+        console.log(`网易云 Cookie 刷新完成，更新 ${setCookieHeaders.length} 个 Cookie 字段，KV 保存完整 Cookie`);
         return finishNeteaseCookieRefreshSuccess(env, {
             ok: true,
             statusCode: 200,
@@ -1815,9 +2057,10 @@ async function refreshNeteaseCookie(env, trigger = {}, options = {}) {
             upstream: {
                 status: response.status,
                 code: upstreamCode,
+                message: upstreamMessage || null,
             },
             setCookieCount: setCookieHeaders.length,
-            storedCookieNames: ['MUSIC_U'],
+            storedCookieNames,
             kv: {
                 binding: getCookieKvBindingName(env),
                 writes: options.includeWriteDetails
@@ -1855,6 +2098,16 @@ async function createNeteaseBody(body) {
     };
 }
 
+async function createNeteaseEapiBody(pathname, body) {
+    const payload = JSON.stringify(body);
+    const digestText = `nobody${pathname}use${payload}md5forencrypt`;
+    const digest = bytesToHexLower(md5Binary(encoder.encode(digestText)));
+    const data = `${pathname}-${NETEASE_EAPI_SALT}-${payload}-${NETEASE_EAPI_SALT}-${digest}`;
+    return {
+        params: await aesEcbEncryptHexUpper(data, NETEASE_EAPI_KEY),
+    };
+}
+
 function randomHex(length) {
     const bytes = new Uint8Array(Math.ceil(length / 2));
     crypto.getRandomValues(bytes);
@@ -1887,6 +2140,36 @@ async function aesCbcEncryptBase64(text, keyText) {
     return bytesToBase64(new Uint8Array(encrypted));
 }
 
+async function aesEcbEncryptHexUpper(text, keyText) {
+    const cryptoKey = await crypto.subtle.importKey(
+        'raw',
+        encoder.encode(keyText),
+        { name: 'AES-CBC' },
+        false,
+        ['encrypt']
+    );
+
+    const payload = pkcs7Pad(encoder.encode(text), 16);
+    const encrypted = new Uint8Array(payload.length);
+    const iv = new Uint8Array(16);
+
+    for (let offset = 0; offset < payload.length; offset += 16) {
+        const block = payload.slice(offset, offset + 16);
+        // WebCrypto has no AES-ECB; one zero-IV CBC block is equivalent to ECB for that block.
+        const encryptedBlock = await crypto.subtle.encrypt(
+            {
+                name: 'AES-CBC',
+                iv,
+            },
+            cryptoKey,
+            block
+        );
+        encrypted.set(new Uint8Array(encryptedBlock).slice(0, 16), offset);
+    }
+
+    return bytesToHexUpper(encrypted);
+}
+
 function pkcs7Pad(bytes, blockSize) {
     const remainder = bytes.length % blockSize;
     const padding = remainder === 0 ? blockSize : blockSize - remainder;
@@ -1902,6 +2185,16 @@ function bytesToBase64(bytes) {
         binary += String.fromCharCode(byte);
     }
     return btoa(binary);
+}
+
+function bytesToHexLower(bytes) {
+    return Array.from(bytes)
+        .map((byte) => byte.toString(16).padStart(2, '0'))
+        .join('');
+}
+
+function bytesToHexUpper(bytes) {
+    return bytesToHexLower(bytes).toUpperCase();
 }
 
 function rsaEncryptSecretKey(secretKey) {
