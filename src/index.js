@@ -1004,6 +1004,10 @@ function isTelegramPushEnabled(env) {
     return Boolean(getTelegramBotId(env) && getTelegramChatId(env));
 }
 
+function isTelegramSuccessPushEnabled(env) {
+    return isTruthy(env && env.TELEGRAM_PUSH_SUCCESS_ENABLED);
+}
+
 async function sendTelegramMessage(env, text) {
     const botId = getTelegramBotId(env);
     const chatId = getTelegramChatId(env);
@@ -1066,6 +1070,9 @@ async function notifyNeteaseCookieCheck(env, result) {
     if (!isTelegramPushEnabled(env)) {
         return null;
     }
+    if (result?.ok && !isTelegramSuccessPushEnabled(env)) {
+        return null;
+    }
 
     const pushResult = await sendTelegramMessage(env, buildNeteaseCookieCheckMessage(result));
     if (!pushResult.ok) {
@@ -1092,6 +1099,9 @@ async function finishNeteaseCookieRefreshSuccess(env, success) {
 
 async function notifyNeteaseCookieRefreshSuccess(env, success) {
     if (!isTelegramPushEnabled(env)) {
+        return null;
+    }
+    if (!isTelegramSuccessPushEnabled(env)) {
         return null;
     }
 

@@ -11,6 +11,7 @@ CACHE_MAX_AGE = "300"
 PICSIZE = "300"
 LRCTYPE = "0"
 NETEASE_COOKIE_REFRESH_ENABLED = "true"
+TELEGRAM_PUSH_SUCCESS_ENABLED = "false"
 
 [triggers]
 crons = ["0 */12 * * *"]
